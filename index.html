@@ -395,7 +395,7 @@
          <div class="flex gap-2 items-center"><input type="email" class="flex-1 px-4 py-3 rounded-xl border-2 border-pink-200 focus:border-pink-400 focus:outline-none transition-colors single-email-input" placeholder="contoh@gmail.com" oninput="validateSingleEmails()"> <button type="button" onclick="removeSingleEmailInput(this)" class="text-pink-400 hover:text-pink-600 text-lg font-bold hidden">✕</button>
          </div>
         </div><button type="button" onclick="addSingleEmailInput()" class="text-xs text-pink-500 hover:text-pink-600 font-medium mt-2">+ Tambah Email</button>
-        <p id="single-email-error" class="text-red-500 text-xs mt-2 hidden">⚠️ Format email tidak valid!</p>
+        <p id="single-email-error" class="text-red-500 text-xs mt-2 hidden"></p>
         <p id="single-email-success" class="text-green-500 text-xs mt-2 hidden"></p>
         <p id="price-total" class="text-pink-500 font-bold text-sm mt-3 text-center hidden">Total: <span id="total-price">Rp 3K</span></p>
        </div><!-- Group Email Inputs -->
@@ -534,15 +534,72 @@
         const orders = JSON.parse(localStorage.getItem('myclips_orders') || '[]');
         allOrders = orders.filter(order => order.user_id === currentUserId);
         updateHistoryDisplay();
+        // Schedule deletion timers for localStorage orders
+        allOrders.forEach(order => {
+          scheduleOrderDeletion(order);
+        });
       } catch (e) {
         console.error('Failed to load from localStorage:', e);
         allOrders = [];
       }
     }
 
+    function getDurationInMs(packageName, productName) {
+      // Canva Premium durations
+      if (productName === 'Canva Premium') {
+        if (packageName === '1 Bulan') return 30 * 24 * 60 * 60 * 1000;
+        if (packageName === '3 Bulan') return 90 * 24 * 60 * 60 * 1000;
+        if (packageName === 'Paket Grup (15 akun)/Bulan') return 30 * 24 * 60 * 60 * 1000;
+      }
+      
+      // CapCut Premium durations - private (bukan sharing)
+      if (productName === 'CapCut Premium') {
+        if (packageName === '7 Hari') return 7 * 24 * 60 * 60 * 1000;
+        if (packageName === '14 Hari') return 14 * 24 * 60 * 60 * 1000;
+        if (packageName === '1 Bulan') return 30 * 24 * 60 * 60 * 1000;
+      }
+      
+      // ChatGPT Pro durations
+      if (productName === 'ChatGPT Pro') {
+        if (packageName === '15 Hari') return 15 * 24 * 60 * 60 * 1000;
+        if (packageName === '30 Hari') return 30 * 24 * 60 * 60 * 1000;
+      }
+      
+      return 24 * 60 * 60 * 1000; // Default 1 day
+    }
+    
+    function formatCountdownTime(ms) {
+      if (ms <= 0) return "0m 0s";
+      
+      const days = Math.floor(ms / (24 * 60 * 60 * 1000));
+      const hours = Math.floor((ms % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
+      const minutes = Math.floor((ms % (60 * 60 * 1000)) / (60 * 1000));
+      const seconds = Math.floor((ms % (60 * 1000)) / 1000);
+      
+      if (days > 0) {
+        return `${days}h ${hours}j`;
+      } else if (hours > 0) {
+        return `${hours}j ${minutes}m`;
+      } else if (minutes > 0) {
+        return `${minutes}m ${seconds}s`;
+      } else {
+        return `${seconds}s`;
+      }
+    }
+
+    // Track active timers to prevent duplicates
+    const activeTimers = new Map();
+
     function startAutoCompleteTimers() {
       allOrders.forEach(order => {
         if (order.status === 'pending') {
+          const orderKey = order.__backendId || (order.product_name + order.order_date);
+          
+          // Clear existing timer if any
+          if (activeTimers.has(orderKey + '_complete')) {
+            clearTimeout(activeTimers.get(orderKey + '_complete'));
+          }
+          
           const orderDate = new Date(order.order_date);
           const now = new Date();
           const timeElapsed = now - orderDate;
@@ -554,13 +611,22 @@
           } else {
             // Schedule for auto-complete after remaining time
             const remainingTime = twelveHoursMs - timeElapsed;
-            setTimeout(() => autoCompleteOrder(order), remainingTime);
+            const timerId = setTimeout(() => {
+              autoCompleteOrder(order);
+              activeTimers.delete(orderKey + '_complete');
+            }, remainingTime);
+            activeTimers.set(orderKey + '_complete', timerId);
           }
         }
+        
+        // Schedule auto-deletion based on package duration
+        scheduleOrderDeletion(order);
       });
     }
 
     async function autoCompleteOrder(order) {
+      if (!order.__backendId) return; // Can't update without backendId
+      
       const updatedOrder = {
         ...order,
         status: 'completed'
@@ -570,7 +636,38 @@
         const result = await window.dataSdk.update(updatedOrder);
         if (result.isOk) {
           showToast(`✅ Pesanan ${order.product_name} otomatis selesai!`, 'success');
+          // Update local array
+          const idx = allOrders.findIndex(o => o.__backendId === order.__backendId);
+          if (idx !== -1) {
+            allOrders[idx].status = 'completed';
+            updateHistoryDisplay();
+          }
         }
+      }
+    }
+
+    async function scheduleOrderDeletion(order) {
+      // DISABLED: History pesanan sekarang tidak auto-delete
+      // Pesanan akan terus tersimpan di history selamanya
+      return;
+    }
+
+    async function deleteOrder(order) {
+      if (window.dataSdk && order.__backendId) {
+        const result = await window.dataSdk.delete(order);
+        if (result.isOk) {
+          showToast(`🗑️ Pesanan ${order.product_name} otomatis dihapus (paket berakhir)`, 'success');
+          // Refresh history display
+          allOrders = allOrders.filter(o => o.__backendId !== order.__backendId);
+          updateHistoryDisplay();
+        }
+      } else {
+        // Fallback: remove from localStorage
+        let orders = JSON.parse(localStorage.getItem('myclips_orders') || '[]');
+        orders = orders.filter(o => o.order_date !== order.order_date || o.product_name !== order.product_name);
+        localStorage.setItem('myclips_orders', JSON.stringify(orders));
+        allOrders = allOrders.filter(o => o.order_date !== order.order_date || o.product_name !== order.product_name);
+        updateHistoryDisplay();
       }
     }
 
@@ -898,7 +995,7 @@
         priceEl.classList.add('hidden');
         if (emails.length > 0) {
           const invalidCount = emails.filter(email => !emailRegex.test(email)).length;
-          errorEl.textContent = `⚠️ ${invalidCount} email format tidak valid`;
+          errorEl.innerHTML = `⚠️ ${invalidCount} email format tidak valid!<br><span style="font-size: 0.7rem; opacity: 0.9; margin-top: 0.25rem; display: block;">(contoh: alamatemail@gmail.com / alamatemail@yahoo.com)</span>`;
           errorEl.classList.remove('hidden');
         }
         checkoutBtn.disabled = true;
@@ -971,7 +1068,7 @@
         successEl.classList.add('hidden');
         if (emails.length > 0) {
           const invalidCount = emails.filter(email => !emailRegex.test(email)).length;
-          errorEl.textContent = `⚠️ ${invalidCount} email format tidak valid`;
+          errorEl.textContent = `⚠️ ${invalidCount} email format tidak valid! (contoh: alamatemail@gmail.com)`;
           errorEl.classList.remove('hidden');
         }
         checkoutBtn.disabled = true;
@@ -986,9 +1083,12 @@
       let orderData;
       
       if (isCapCut) {
+        const priceMap = { '7 Hari': 6000, '14 Hari': 11000, '1 Bulan': 20000 };
+        const packagesOrdered = [];
+        
+        // Prepare CapCut message
         message = '*Halo MYCLIPS!*\nSaya ingin memesan:\n━━━━━━━━━━━━━━━━━━\n';
         let totalPrice = 0;
-        const priceMap = { '7 Hari': 6000, '14 Hari': 11000, '1 Bulan': 20000 };
         
         Object.entries(capCutQuantities).forEach(([pkg, qty]) => {
           if (qty > 0) {
@@ -996,23 +1096,39 @@
             const subtotal = price * qty;
             message += `*CapCut Premium - ${pkg}*\n*Jumlah:* ${qty}\n*Harga Satuan:* Rp ${price.toLocaleString('id-ID')}\n`;
             totalPrice += subtotal;
+            packagesOrdered.push({ pkg, qty, price, subtotal });
           }
         });
         
         message += `━━━━━━━━━━━━━━━━━━\n*Total Harga:* Rp ${totalPrice.toLocaleString('id-ID')}\n━━━━━━━━━━━━━━━━━━\nMohon diproses ya, terima kasih!`;
         
-        // Save to data SDK with user ID
-        orderData = {
-          user_id: currentUserId,
-          product_name: selectedProduct,
-          package: selectedPackage,
-          email: 'Multiple CapCut Orders',
-          price: selectedPrice,
-          quantity: Object.values(capCutQuantities).reduce((a, b) => a + b, 0),
-          total_price: totalPrice.toString(),
-          order_date: new Date().toISOString(),
-          status: 'pending'
-        };
+        // Save each CapCut package as separate order
+        const savePromises = packagesOrdered.map(async (item) => {
+          const orderData = {
+            user_id: currentUserId,
+            product_name: selectedProduct,
+            package: item.pkg,
+            email: 'CapCut Order',
+            price: item.price.toString(),
+            quantity: item.qty,
+            total_price: item.subtotal.toString(),
+            order_date: new Date().toISOString(),
+            status: 'pending'
+          };
+          
+          if (isUsingDataSdk && window.dataSdk) {
+            return await window.dataSdk.create(orderData);
+          } else {
+            saveOrderToLocalStorage(orderData);
+            allOrders.push(orderData);
+            return { isOk: true };
+          }
+        });
+        
+        // Wait for all saves to complete
+        await Promise.all(savePromises);
+        updateHistoryDisplay();
+        showToast('Pesanan berhasil disimpan! 📝', 'success');
       } else {
         const isGroupPackage = selectedPackage.includes('Paket Grup');
         
@@ -1062,18 +1178,20 @@
         }
       }
       
-      // Save to both data SDK and localStorage
-      if (isUsingDataSdk && window.dataSdk) {
-        const result = await window.dataSdk.create(orderData);
-        if (result.isOk) {
+      // Save order data if not CapCut (CapCut already saved above)
+      if (!isCapCut) {
+        if (isUsingDataSdk && window.dataSdk) {
+          const result = await window.dataSdk.create(orderData);
+          if (result.isOk) {
+            showToast('Pesanan berhasil disimpan! 📝', 'success');
+          }
+        } else {
+          // Fallback to localStorage
+          saveOrderToLocalStorage(orderData);
+          allOrders.push(orderData);
+          updateHistoryDisplay();
           showToast('Pesanan berhasil disimpan! 📝', 'success');
         }
-      } else {
-        // Fallback to localStorage
-        saveOrderToLocalStorage(orderData);
-        allOrders.push(orderData);
-        updateHistoryDisplay();
-        showToast('Pesanan berhasil disimpan! 📝', 'success');
       }
       
       const encodedMessage = encodeURIComponent(message);
@@ -1102,7 +1220,12 @@
         return;
       }
       
-      container.innerHTML = allOrders.map(order => {
+      // Sort orders by date - newest first
+      const sortedOrders = [...allOrders].sort((a, b) => {
+        return new Date(b.order_date) - new Date(a.order_date);
+      });
+      
+      container.innerHTML = sortedOrders.map(order => {
         const orderDate = new Date(order.order_date);
         const formattedDate = orderDate.toLocaleDateString('id-ID', { 
           year: 'numeric', 
@@ -1114,22 +1237,15 @@
         
         const statusClass = order.status === 'completed' ? 'status-completed' : 'status-pending';
         const statusText = order.status === 'completed' ? '✓ Selesai' : '⏳ Pending';
+        const orderKey = order.__backendId || (order.product_name + order.order_date);
         
         let timerHtml = '';
         if (order.status === 'pending') {
-          const now = new Date();
-          const timeElapsed = now - orderDate;
-          const twelveHoursMs = 12 * 60 * 60 * 1000;
-          const remainingMs = twelveHoursMs - timeElapsed;
-          
-          if (remainingMs > 0) {
-            const remainingHours = Math.floor(remainingMs / (60 * 60 * 1000));
-            const remainingMinutes = Math.floor((remainingMs % (60 * 60 * 1000)) / (60 * 1000));
-            timerHtml = `<p class="text-xs text-blue-500 font-semibold mt-1">⏰ Otomatis selesai dalam: ${remainingHours}j ${remainingMinutes}m</p>`;
-          } else {
-            timerHtml = `<p class="text-xs text-green-500 font-semibold mt-1">✅ Akan diproses segera...</p>`;
-          }
+          timerHtml = `<p class="text-xs text-blue-500 font-semibold mt-1">⏰ Otomatis selesai dalam: <span data-order-key="${orderKey}" class="timer-complete">--</span></p>`;
         }
+        
+        // History tidak akan pernah dihapus - pesanan tersimpan selamanya
+        let deleteCountdownHtml = '';
         
         return `
           <div class="order-item card-texture rounded-xl p-5 border border-pink-100 shadow-md hover:shadow-lg transition-shadow">
@@ -1145,6 +1261,7 @@
                   <p><span class="font-semibold">Qty:</span> ${order.quantity}</p>
                   <p class="text-xs text-gray-400">📅 ${formattedDate}</p>
                   ${timerHtml}
+                  ${deleteCountdownHtml}
                 </div>
               </div>
               <div class="text-right">
@@ -1155,8 +1272,43 @@
         `;
       }).join('');
       
-      // Start timers untuk auto-complete
+      // Start timers untuk auto-complete dan auto-delete
       startAutoCompleteTimers();
+      // Force first update of timers
+      updateTimerDisplays();
+    }
+    
+    // Global countdown update interval
+    let countdownInterval = null;
+    
+    function updateTimerDisplays() {
+      allOrders.forEach(order => {
+        const orderDate = new Date(order.order_date);
+        const now = new Date();
+        const orderKey = order.__backendId || (order.product_name + order.order_date);
+        
+        // Update completion timer only
+        if (order.status === 'pending') {
+          const timeElapsed = now - orderDate;
+          const twelveHoursMs = 12 * 60 * 60 * 1000;
+          const remainingMs = twelveHoursMs - timeElapsed;
+          
+          const timerElement = document.querySelector(`[data-order-key="${orderKey}"].timer-complete`);
+          if (timerElement && remainingMs > 0) {
+            const remainingHours = Math.floor(remainingMs / (60 * 60 * 1000));
+            const remainingMinutes = Math.floor((remainingMs % (60 * 60 * 1000)) / (60 * 1000));
+            timerElement.textContent = `${remainingHours}j ${remainingMinutes}m`;
+          }
+        }
+      });
+    }
+    
+    function startCountdownUpdates() {
+      if (countdownInterval) clearInterval(countdownInterval);
+      
+      countdownInterval = setInterval(() => {
+        updateTimerDisplays();
+      }, 1000);
     }
     
     function showToast(message, type = 'info') {
@@ -1176,6 +1328,7 @@
     async function initializeApp() {
       initializeUserId();
       await initializeDataSDK();
+      startCountdownUpdates();
       
       // Setup info button listeners after DOM is ready
       document.querySelectorAll('.info-tooltip button').forEach(button => {
@@ -1200,5 +1353,5 @@
       initializeApp();
     }
   </script>
- <script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'9db7cfbf1161a071',t:'MTc3MzM3MTA2OS4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+ <script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'9db830c303fcef74',t:'MTc3MzM3NTA0My4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
